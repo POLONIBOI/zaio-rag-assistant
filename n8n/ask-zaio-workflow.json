@@ -1,0 +1,455 @@
+{
+  "id": "askZaioRagFlow01",
+  "name": "Ask the Zaio assistant",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 1 · Ask\nThe student types a question into an n8n form. **Settings** holds the two things you may need to change: where the RAG API runs, and (optionally) a Discord webhook for questions the assistant can't answer.\n\nn8n in Docker: keep `host.docker.internal`. n8n installed with npm: use `http://localhost:8000`.",
+        "height": 460,
+        "width": 620,
+        "color": 7
+      },
+      "id": "ef871250-8243-4baf-9ae6-01b2049a0ea7",
+      "name": "Note: Ask",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 2 · Call the RAG API\n`POST /ask` with `{\"question\": ...}`. The reply is `{answer, source}`, and `source` is `null` when the answer isn't in the handbook or on zaio.io.\n\nThe timeout is 5 minutes because the free local model can take a minute on a slow laptop.",
+        "height": 460,
+        "width": 560,
+        "color": 4
+      },
+      "id": "012b8f97-7943-47fe-b009-67a4c0e295d3",
+      "name": "Note: API",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        580,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 3 · Reply\n**answered** → the answer and its source.\n**not found** → the question goes to the tutors' Discord channel (if a webhook is set) so someone can follow up, then the student is told.\n**error** → a friendly message. The technical reason (API down, index not built...) stays in the execution log, in the output of **Read the reply**.",
+        "height": 840,
+        "width": 920,
+        "color": 6
+      },
+      "id": "b5e7414b-f9cd-401b-9f2b-bfb19e28f7a4",
+      "name": "Note: Reply",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1180,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "formTitle": "Ask the Zaio assistant",
+        "formDescription": "Ask anything about the bootcamp handbook or the courses on zaio.io. Answers come only from those two sources, with a link to where they came from.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Question",
+              "fieldType": "textarea",
+              "placeholder": "e.g. What courses does ZAIO offer?",
+              "requiredField": true
+            }
+          ]
+        },
+        "responseMode": "lastNode",
+        "options": {
+          "buttonLabel": "Ask"
+        }
+      },
+      "id": "25e460ad-7a5b-4b62-a76b-5ca7561f938b",
+      "name": "Student asks a question",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.3,
+      "position": [
+        0,
+        200
+      ],
+      "webhookId": "ce4cd433-9580-42d2-af9b-3703d0bd1895"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a0e808d8-42fa-47ae-a6af-653c77029223",
+              "name": "apiUrl",
+              "value": "http://host.docker.internal:8000",
+              "type": "string"
+            },
+            {
+              "id": "5963f571-8f72-4057-9560-4a2fbc75d369",
+              "name": "discordWebhookUrl",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "4ab6f16b-8a48-4d5a-a2f1-faebad6caa3c",
+              "name": "question",
+              "value": "={{ $json.Question.trim() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "e8486750-8ccc-46d1-8112-8b25eb441bfe",
+      "name": "Settings",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        260,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.apiUrl }}/ask",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ question: $json.question }) }}",
+        "options": {
+          "timeout": 300000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "719f6056-0943-48b4-baf7-aec4795678f0",
+      "name": "Ask the RAG API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        200
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// The HTTP node never throws: it returns HTTP errors as normal items\n// (\"never error\") and a failed connection as an item with an \"error\" field\n// (\"continue on fail\"). So every outcome ends up here, and this node sorts\n// them into one of three.\nconst question = $('Settings').item.json.question;\nconst body = $json.body ?? {};\n\nif ($json.statusCode === 200 && body.source) {\n  return { json: { outcome: 'answered', question, answer: body.answer, source: body.source } };\n}\nif ($json.statusCode === 200) {\n  // source is null: neither the handbook nor the website had the answer\n  return { json: { outcome: 'not found', question, answer: body.answer } };\n}\nconst reason = body.error ?? $json.error?.message ?? 'no response from the API';\nreturn { json: { outcome: 'error', question, reason } };\n"
+      },
+      "id": "e6fe19b1-276f-4c85-b2ed-343e788c13df",
+      "name": "Read the reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "7476b4c8-e76c-4f34-aa11-e9a622c39ac3",
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "answered",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "answered"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "78a254bc-b3b4-4541-b74c-6011b1fa45c9",
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "not found",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "not found"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "26c872c0-39da-4b2d-87b2-219b41790250",
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "error",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "error"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a5c97c09-bde1-4c34-9e56-24ae6b5ca193",
+      "name": "What came back?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1260,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "Here's what I found",
+        "completionMessage": "={{ $json.answer }}\n\nSource: {{ $json.source }}",
+        "options": {}
+      },
+      "id": "abe5d213-1539-4c80-8fdc-45210112bf9c",
+      "name": "Show the answer",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 1,
+      "position": [
+        1880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "33ef9ed9-3177-43d8-9077-a8f01fa461b5",
+              "leftValue": "={{ $('Settings').item.json.discordWebhookUrl }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "56769a81-2ee5-47eb-972b-2912778ff99a",
+      "name": "Discord webhook set?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1480,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Settings').item.json.discordWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ username: 'Zaio assistant', content: 'A student asked something the assistant could not answer from the handbook or zaio.io:\\n> ' + $('Read the reply').item.json.question }) }}",
+        "options": {}
+      },
+      "id": "c931bf77-b093-4283-9c57-6af43ee64ad0",
+      "name": "Tell the tutors on Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1700,
+        120
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "Not in the knowledge base",
+        "completionMessage": "={{ $('Read the reply').item.json.answer }}\n\nIt isn't in the student handbook or on zaio.io. Ask your tutor on Discord, or email hello@zaio.io.",
+        "options": {}
+      },
+      "id": "23a95dfc-b6ff-4000-a6c5-129a4596a619",
+      "name": "Say it wasn't found",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 1,
+      "position": [
+        1920,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "The assistant is offline",
+        "completionMessage": "Your question couldn't be answered right now. Please try again in a minute, or ask a tutor on Discord.",
+        "options": {}
+      },
+      "id": "389ae96b-319a-4cd8-906b-bbb418cf618b",
+      "name": "Show an error",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 1,
+      "position": [
+        1880,
+        440
+      ]
+    }
+  ],
+  "connections": {
+    "Student asks a question": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Settings": {
+      "main": [
+        [
+          {
+            "node": "Ask the RAG API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask the RAG API": {
+      "main": [
+        [
+          {
+            "node": "Read the reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read the reply": {
+      "main": [
+        [
+          {
+            "node": "What came back?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "What came back?": {
+      "main": [
+        [
+          {
+            "node": "Show the answer",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Discord webhook set?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Show an error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Discord webhook set?": {
+      "main": [
+        [
+          {
+            "node": "Tell the tutors on Discord",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Say it wasn't found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tell the tutors on Discord": {
+      "main": [
+        [
+          {
+            "node": "Say it wasn't found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": []
+}
