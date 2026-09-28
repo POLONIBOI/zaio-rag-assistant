@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.env
+
+# rebuilt by `python -m app.ingest`
+chroma_db/
