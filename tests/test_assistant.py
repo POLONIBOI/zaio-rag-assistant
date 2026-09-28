@@ -1,13 +1,20 @@
 import pytest
 
 from app import config
-from app.assistant import HandbookAssistant, format_source
+from app.assistant import Assistant, format_source
 from app.llm import LLMAnswer
 from app.retriever import RetrievedChunk
 
+TERMS = "https://www.zaio.io/terms"
+COMPARE = "https://www.zaio.io/compare-courses"
 
-def chunk(page, similarity, text="..."):
-    return RetrievedChunk(text=text, page=page, section="Fees", similarity=similarity)
+
+def handbook(page, similarity=0.5, text="..."):
+    return RetrievedChunk(text=text, source="handbook", section="Fees", page=page, similarity=similarity)
+
+
+def website(url, similarity=0.5, text="..."):
+    return RetrievedChunk(text=text, source="website", section="", url=url, title="Page", similarity=similarity)
 
 
 class FakeRetriever:
@@ -30,33 +37,50 @@ class FakeLLM:
 
 def make(chunks, reply=None):
     llm = FakeLLM(reply)
-    return HandbookAssistant(FakeRetriever(chunks), llm, min_similarity=0.25), llm
+    return Assistant(FakeRetriever(chunks), llm, min_similarity=0.25), llm
 
 
-def test_answer_uses_the_pages_the_llm_cited():
+def test_handbook_answer_cites_the_page():
     assistant, llm = make(
-        [chunk(16, 0.59), chunk(17, 0.47)],
-        LLMAnswer(found=True, answer="The total fee is R 38,950.", pages=[16]),
+        [handbook(16, 0.59), website(COMPARE, 0.55), handbook(17, 0.47)],
+        LLMAnswer(found=True, answer="The total fee is R 38,950.", excerpts=[1]),
     )
     result = assistant.ask("How much does the bootcamp cost?")
 
     assert result.answer == "The total fee is R 38,950."
-    assert result.source == "Page 16"
-    question, sent_chunks = llm.calls[0]
+    assert result.source == "Student Handbook - Page 16"
+    question, sent = llm.calls[0]
     assert question == "How much does the bootcamp cost?"
-    assert [c.page for c in sent_chunks] == [16, 17]
+    assert len(sent) == 3
 
 
-def test_answer_from_two_pages():
+def test_website_answer_cites_the_url():
     assistant, _ = make(
-        [chunk(16, 0.5), chunk(17, 0.5)],
-        LLMAnswer(found=True, answer="...", pages=[17, 16]),
+        [handbook(16, 0.41), website(TERMS, 0.52)],
+        LLMAnswer(found=True, answer="Partial refunds are available within the first 30 days.", excerpts=[2]),
     )
-    assert assistant.ask("Tell me about financing").source == "Pages 16, 17"
+    assert assistant.ask("What is the refund policy?").source == TERMS
+
+
+def test_first_cited_excerpt_decides_the_source():
+    chunks = [handbook(16), website(COMPARE)]
+    web_first, _ = make(chunks, LLMAnswer(found=True, answer="...", excerpts=[2, 1]))
+    handbook_first, _ = make(chunks, LLMAnswer(found=True, answer="...", excerpts=[1, 2]))
+
+    assert web_first.ask("fees?").source == COMPARE
+    assert handbook_first.ask("fees?").source == "Student Handbook - Page 16"
+
+
+def test_answer_from_two_handbook_pages():
+    assistant, _ = make(
+        [handbook(16), website(COMPARE), handbook(17)],
+        LLMAnswer(found=True, answer="...", excerpts=[3, 2, 1]),
+    )
+    assert assistant.ask("Tell me about financing").source == "Student Handbook - Pages 16, 17"
 
 
 def test_off_topic_question_never_reaches_the_llm():
-    assistant, llm = make([chunk(6, 0.10), chunk(25, 0.08)])
+    assistant, llm = make([website(COMPARE, 0.12), handbook(6, 0.10)])
     result = assistant.ask("What is the capital of France?")
 
     assert result.answer == config.NOT_FOUND_ANSWER
@@ -72,37 +96,40 @@ def test_empty_retrieval_is_not_found():
 
 def test_llm_saying_not_found_gives_the_standard_message():
     assistant, _ = make(
-        [chunk(14, 0.47)],
-        LLMAnswer(found=False, answer="The handbook only gives the MCQ weighting.", pages=[14]),
+        [handbook(14, 0.47)],
+        LLMAnswer(found=False, answer="The handbook only gives the MCQ weighting.", excerpts=[1]),
     )
     result = assistant.ask("What is the pass mark for the MCQs?")
-    assert result.answer == config.NOT_FOUND_ANSWER
+    assert result.answer == "I could not find that information in the available knowledge base."
     assert result.source is None
 
 
 def test_blank_answer_is_treated_as_not_found():
-    assistant, _ = make([chunk(14, 0.5)], LLMAnswer(found=True, answer="   ", pages=[14]))
+    assistant, _ = make([handbook(14)], LLMAnswer(found=True, answer="   ", excerpts=[1]))
     assert assistant.ask("q").answer == config.NOT_FOUND_ANSWER
 
 
-def test_pages_that_were_not_retrieved_are_ignored():
+def test_excerpt_numbers_that_were_not_sent_are_ignored():
     assistant, _ = make(
-        [chunk(24, 0.33), chunk(21, 0.30)],
-        LLMAnswer(found=True, answer="A final mark of 70% and above.", pages=[12, 24]),
+        [handbook(24, 0.33), website(TERMS, 0.30)],
+        LLMAnswer(found=True, answer="A final mark of 70% and above.", excerpts=[7, 0, -1, 1]),
     )
-    assert assistant.ask("What mark do I need to get placed?").source == "Page 24"
+    assert assistant.ask("What mark do I need to get placed?").source == "Student Handbook - Page 24"
 
 
-def test_no_usable_pages_falls_back_to_best_chunk():
-    assistant, _ = make([chunk(11, 0.71), chunk(12, 0.49)],
-                        LLMAnswer(found=True, answer="Tuesdays and Thursdays.", pages=[]))
-    assert assistant.ask("When are live classes?").source == "Page 11"
+def test_no_usable_citation_falls_back_to_best_chunk():
+    assistant, _ = make([website(COMPARE, 0.71), handbook(11, 0.49)],
+                        LLMAnswer(found=True, answer="From R1,950 a month.", excerpts=[]))
+    assert assistant.ask("What is the cheapest bootcamp?").source == COMPARE
 
 
-@pytest.mark.parametrize("pages, expected", [
-    ([12], "Page 12"),
-    ([17, 16], "Pages 16, 17"),
-    ([20, 20], "Page 20"),
+@pytest.mark.parametrize("cited, expected", [
+    ([handbook(12)], "Student Handbook - Page 12"),
+    ([handbook(17), handbook(16)], "Student Handbook - Pages 16, 17"),
+    ([handbook(20), handbook(20)], "Student Handbook - Page 20"),
+    ([handbook(16), website(COMPARE), handbook(17)], "Student Handbook - Pages 16, 17"),
+    ([website(TERMS), handbook(16)], TERMS),
+    ([website(TERMS), website(COMPARE)], TERMS),
 ])
-def test_format_source(pages, expected):
-    assert format_source(pages) == expected
+def test_format_source(cited, expected):
+    assert format_source(cited) == expected

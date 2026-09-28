@@ -1,11 +1,15 @@
-"""Part 1: turn the handbook PDF into searchable chunks in ChromaDB.
+"""Part 1: turn the handbook PDF and the crawled website into chunks in ChromaDB.
 
-    python -m app.ingest             # build (or rebuild) the index
-    python -m app.ingest --preview   # print the chunks without embedding anything
+    python -m app.ingest                         # build (or rebuild) the index
+    python -m app.ingest --preview handbook      # print chunks without embedding anything
+    python -m app.ingest --preview website
 
-Pipeline: load PDF -> extract text per page -> clean -> chunk -> embed -> store.
-Chunks never cross a page boundary, so every chunk carries exactly one page
-number and the API can always say where an answer came from.
+Handbook: load PDF -> extract text per page -> clean -> chunk -> embed -> store.
+Website:  data/website/pages.json (from `python -m app.crawl`) -> chunk -> embed -> store.
+
+Both go into the same collection. A chunk never crosses a PDF page or a web
+page, so every chunk has exactly one page number or one URL and the API can
+always say where an answer came from.
 """
 
 import argparse
@@ -17,6 +21,9 @@ from pathlib import Path
 from pypdf import PdfReader
 
 from app import config
+
+HANDBOOK = "handbook"
+WEBSITE = "website"
 
 # The handbook prints page numbers letter-spaced ("1 3") and some headings the
 # same way ("C O N T A C T"). Words inside those lines are two spaces apart.
@@ -45,21 +52,44 @@ class Page:
 @dataclass(frozen=True)
 class Chunk:
     text: str
-    page: int
+    source: str  # HANDBOOK or WEBSITE
     section: str
     index: int  # position within its page
+    page: int | None = None  # handbook only
+    url: str | None = None  # website only
+    title: str = ""  # website page title
 
     @property
     def id(self) -> str:
-        return f"p{self.page}-c{self.index}"
+        if self.source == HANDBOOK:
+            return f"handbook-p{self.page}-c{self.index}"
+        slug = self.url.removeprefix(config.WEBSITE_URL).strip("/").replace("/", "-") or "home"
+        return f"website-{slug}-c{self.index}"
 
     @property
     def embedding_text(self) -> str:
         # Prefixing the section name gives short chunks more to match on:
         # "Option 2: Financing with Capitec..." is easier to find for a
         # question about fees when the vector also knows it's under "Fees".
-        return f"{self.section}: {self.text}"
+        # Web chunks get the page title too ("Refund Policy", "Data Science
+        # Tuition"), which is often the only place the topic is named.
+        if self.source == HANDBOOK:
+            return f"{self.section}: {self.text}"
+        return f"{self.title}: {self.text}" if self.title else self.text
 
+    @property
+    def metadata(self) -> dict:
+        # Chroma can't store None, so each source only gets the fields it has.
+        meta = {"source": self.source, "section": self.section}
+        if self.source == HANDBOOK:
+            meta["page"] = self.page
+        else:
+            meta["url"] = self.url
+            meta["title"] = self.title
+        return meta
+
+
+# --- handbook ---------------------------------------------------------------
 
 def load_pages(pdf_path: Path) -> list[Page]:
     if not pdf_path.exists():
@@ -135,15 +165,78 @@ def chunk_pages(pages: list[Page]) -> list[Chunk]:
         if not text or section in SKIP_SECTIONS:
             continue
         for i, piece in enumerate(split_into_chunks(text)):
-            chunks.append(Chunk(text=piece, page=page.number, section=section, index=i))
+            chunks.append(Chunk(text=piece, source=HANDBOOK, page=page.number, section=section, index=i))
     return chunks
 
 
-def build_index(pdf_path: Path = config.HANDBOOK_PATH) -> list[Chunk]:
+# --- website ----------------------------------------------------------------
+
+def with_heading(heading: str, text: str) -> str:
+    """'How do live classes work?' + 'Twice a week...' -> one readable line.
+
+    The heading stays in the chunk text because on this site it's often half
+    the answer: an FAQ answer that starts "No, our bootcamps are designed for
+    beginners!" means nothing without the question above it.
+    """
+    if not heading:
+        return text
+    return f"{heading} {text}" if heading[-1] in ".?!:" else f"{heading}: {text}"
+
+
+def chunk_web_page(page, size: int = config.CHUNK_SIZE) -> list[Chunk]:
+    """Sections of one web page -> chunks of up to `size` characters.
+
+    Neighbouring short sections are packed together (a course card is often
+    a heading and one line), and a section longer than `size` is split on
+    sentences with its heading repeated on every piece.
+    """
+    blocks: list[tuple[str, str]] = []  # (heading, text) with the heading already folded in
+    for section in page.sections:
+        full = with_heading(section.heading, section.text)
+        if len(full) <= size:
+            blocks.append((section.heading, full))
+            continue
+        room = size - len(section.heading) - 2
+        for piece in split_into_chunks(section.text, size=room):
+            blocks.append((section.heading, with_heading(section.heading, piece)))
+
+    chunks, texts, heading = [], [], ""
+
+    def flush():
+        if texts:
+            chunks.append(Chunk(text=" ".join(texts), source=WEBSITE, url=page.url, title=page.title,
+                                section=heading or page.title, index=len(chunks)))
+
+    for block_heading, text in blocks:
+        if texts and len(" ".join([*texts, text])) > size:
+            flush()
+            texts = []
+        if not texts:
+            heading = block_heading
+        texts.append(text)
+    flush()
+    return chunks
+
+
+def chunk_website(pages) -> list[Chunk]:
+    return [chunk for page in pages for chunk in chunk_web_page(page)]
+
+
+# --- index ------------------------------------------------------------------
+
+def load_all_chunks(pdf_path: Path = config.HANDBOOK_PATH,
+                    website_path: Path = config.WEBSITE_PAGES_PATH) -> list[Chunk]:
+    from app.crawl import load_pages as load_web_pages
+
+    return chunk_pages(load_pages(pdf_path)) + chunk_website(load_web_pages(website_path))
+
+
+def build_index(pdf_path: Path = config.HANDBOOK_PATH,
+                website_path: Path = config.WEBSITE_PAGES_PATH) -> list[Chunk]:
     from app import vector_store
     from app.embeddings import embed_texts
 
-    chunks = chunk_pages(load_pages(pdf_path))
+    chunks = load_all_chunks(pdf_path, website_path)
     vectors = embed_texts([c.embedding_text for c in chunks])
 
     collection = vector_store.reset_collection()
@@ -151,29 +244,35 @@ def build_index(pdf_path: Path = config.HANDBOOK_PATH) -> list[Chunk]:
         ids=[c.id for c in chunks],
         documents=[c.text for c in chunks],
         embeddings=vectors,
-        metadatas=[{"page": c.page, "section": c.section, "source": "handbook"} for c in chunks],
+        metadatas=[c.metadata for c in chunks],
     )
     return chunks
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Index the student handbook into ChromaDB.")
+    parser = argparse.ArgumentParser(description="Index the handbook and the website into ChromaDB.")
     parser.add_argument("--pdf", type=Path, default=config.HANDBOOK_PATH)
-    parser.add_argument("--preview", action="store_true",
-                        help="print the cleaned chunks and stop (no embeddings, no database)")
+    parser.add_argument("--website", type=Path, default=config.WEBSITE_PAGES_PATH)
+    parser.add_argument("--preview", choices=[HANDBOOK, WEBSITE],
+                        help="print the cleaned chunks of one source and stop (no embeddings, no database)")
     args = parser.parse_args()
 
     if args.preview:
-        for chunk in chunk_pages(load_pages(args.pdf)):
-            print(f"--- {chunk.id} | {chunk.section} | {len(chunk.text)} chars")
-            print(chunk.text)
+        for chunk in load_all_chunks(args.pdf, args.website):
+            if chunk.source == args.preview:
+                where = f"page {chunk.page}" if chunk.page else chunk.url
+                print(f"--- {chunk.id} | {where} | {chunk.section} | {len(chunk.text)} chars")
+                print(chunk.text)
         return
 
-    chunks = build_index(args.pdf)
-    pages = sorted({c.page for c in chunks})
-    print(f"Indexed {len(chunks)} chunks from {len(pages)} pages of {args.pdf.name}")
+    chunks = build_index(args.pdf, args.website)
+    handbook = [c for c in chunks if c.source == HANDBOOK]
+    website = [c for c in chunks if c.source == WEBSITE]
+    print(f"Indexed {len(chunks)} chunks into '{config.COLLECTION_NAME}':")
+    print(f"  handbook  {len(handbook):>4} chunks from {len({c.page for c in handbook})} pages of {args.pdf.name}")
+    print(f"  website   {len(website):>4} chunks from {len({c.url for c in website})} pages of {config.WEBSITE_URL}")
     print(f"Embedding model: {config.EMBEDDING_MODEL}")
-    print(f"Stored in: {config.CHROMA_DIR} (collection '{config.COLLECTION_NAME}')")
+    print(f"Stored in: {config.CHROMA_DIR}")
 
 
 if __name__ == "__main__":

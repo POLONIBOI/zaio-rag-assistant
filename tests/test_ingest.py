@@ -1,5 +1,12 @@
+import pytest
+
 from app import config
-from app.ingest import Page, chunk_pages, clean_page, load_pages, split_into_chunks, unspace
+from app.crawl import Section, WebPage
+from app.crawl import load_pages as load_web_pages
+from app.ingest import (HANDBOOK, WEBSITE, Chunk, Page, chunk_pages, chunk_web_page, chunk_website, clean_page,
+                        load_all_chunks, load_pages, split_into_chunks, unspace, with_heading)
+
+SITE = "https://www.zaio.io"
 
 
 def test_unspace_joins_letter_spaced_text():
@@ -84,3 +91,83 @@ def test_real_handbook():
     fees = [c for c in chunks if "R 38,950" in c.text]
     assert len(fees) == 1
     assert (fees[0].page, fees[0].section) == (16, "Fees")
+
+
+# --- website ----------------------------------------------------------------
+
+@pytest.mark.parametrize("heading, text, expected", [
+    ("How do the live classes work?", "Twice a week.", "How do the live classes work? Twice a week."),
+    ("Upfront Payment", "Pay early and get a discount", "Upfront Payment: Pay early and get a discount"),
+    ("", "No heading here.", "No heading here."),
+])
+def test_with_heading(heading, text, expected):
+    assert with_heading(heading, text) == expected
+
+
+def test_short_sections_are_packed_together():
+    page = WebPage(SITE + "/tuition-financing", "Flexible Tuition Plans", [
+        Section("Upfront Payment", "Invest in yourself, pay early and get a discount"),
+        Section("Loans", "Apply for a loan with our financial partners"),
+    ])
+    [chunk] = chunk_web_page(page, size=200)
+
+    assert chunk.text == ("Upfront Payment: Invest in yourself, pay early and get a discount "
+                          "Loans: Apply for a loan with our financial partners")
+    assert (chunk.source, chunk.url, chunk.title, chunk.section) == (
+        WEBSITE, SITE + "/tuition-financing", "Flexible Tuition Plans", "Upfront Payment")
+
+
+def test_long_section_is_split_with_its_heading_on_every_piece():
+    text = " ".join(f"Refund rule number {i} applies here." for i in range(30))
+    page = WebPage(SITE + "/terms", "Terms and Conditions", [Section("Refund Policy", text)])
+    chunks = chunk_web_page(page, size=150)
+
+    assert len(chunks) > 1
+    assert all(len(c.text) <= 150 for c in chunks)
+    assert all(c.text.startswith("Refund Policy: ") for c in chunks)
+    assert [c.index for c in chunks] == list(range(len(chunks)))
+
+
+def test_section_without_heading_is_labelled_with_the_page_title():
+    page = WebPage(SITE + "/apply-now", "Apply Now", [Section("", "Takes 3 minutes.")])
+    assert chunk_web_page(page)[0].section == "Apply Now"
+
+
+def test_metadata_only_has_the_fields_each_source_uses():
+    # Chroma rejects None, so a handbook chunk can't carry url=None.
+    book = Chunk(text="Total Fees: R 38,950", source=HANDBOOK, section="Fees", index=0, page=16)
+    web = Chunk(text="...", source=WEBSITE, section="Refunds", index=2, url=SITE + "/terms", title="Terms")
+
+    assert book.metadata == {"source": "handbook", "section": "Fees", "page": 16}
+    assert web.metadata == {"source": "website", "section": "Refunds", "url": SITE + "/terms", "title": "Terms"}
+    assert (book.id, web.id) == ("handbook-p16-c0", "website-terms-c2")
+
+
+def test_website_ids_use_the_path():
+    home = Chunk(text="...", source=WEBSITE, section="", index=0, url=SITE, title="Zaio")
+    nested = Chunk(text="...", source=WEBSITE, section="", index=1, url=SITE + "/tuition/data-science", title="")
+    assert (home.id, nested.id) == ("website-home-c0", "website-tuition-data-science-c1")
+
+
+def test_page_title_is_part_of_what_gets_embedded():
+    web = Chunk(text="Full refunds before the start date.", source=WEBSITE, section="", index=0,
+                url=SITE + "/terms", title="Terms and Conditions")
+    assert web.embedding_text == "Terms and Conditions: Full refunds before the start date."
+
+
+def test_real_website_snapshot():
+    pages = load_web_pages(config.WEBSITE_PAGES_PATH)
+    chunks = chunk_website(pages)
+
+    assert len(chunks) > 100
+    assert all(len(c.text) <= config.CHUNK_SIZE for c in chunks)
+    assert {c.url for c in chunks} == {p.url for p in pages}
+
+    terms = [c for c in chunks if c.url == SITE + "/terms" and "Partial refunds" in c.text]
+    assert terms, "the refund terms should be in a chunk of their own page"
+
+
+def test_every_chunk_id_is_unique_across_both_sources():
+    chunks = load_all_chunks()
+    assert {c.source for c in chunks} == {HANDBOOK, WEBSITE}
+    assert len({c.id for c in chunks}) == len(chunks)

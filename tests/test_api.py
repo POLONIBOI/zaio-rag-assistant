@@ -1,7 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from app import api, config
+from app import api, config, vector_store
 from app.api import app
 from app.assistant import NOT_FOUND, Answer
 from app.llm import LLMError, MissingAPIKeyError
@@ -10,7 +10,7 @@ from app.vector_store import IndexNotBuiltError
 
 class FakeAssistant:
     def __init__(self, result=None, raises=None):
-        self.result = result or Answer(answer="The total fee is R 38,950.", source="Page 16")
+        self.result = result or Answer(answer="The total fee is R 38,950.", source="Student Handbook - Page 16")
         self.raises = raises
         self.questions = []
 
@@ -40,16 +40,27 @@ def test_ask_returns_answer_and_source(client, assistant):
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/json"
-    assert response.json() == {"answer": "The total fee is R 38,950.", "source": "Page 16"}
+    assert response.json() == {"answer": "The total fee is R 38,950.", "source": "Student Handbook - Page 16"}
     assert assistant.questions == ["How much does the bootcamp cost?"]
+
+
+def test_website_answer_has_the_url_as_source(client, assistant):
+    assistant.result = Answer(answer="ZAIO offers six bootcamps.", source="https://www.zaio.io/bootcamps")
+    response = client.post("/ask", json={"question": "What courses does ZAIO offer?"})
+
+    assert response.status_code == 200
+    assert response.json() == {"answer": "ZAIO offers six bootcamps.", "source": "https://www.zaio.io/bootcamps"}
 
 
 def test_not_found_has_null_source(client, assistant):
     assistant.result = NOT_FOUND
-    response = client.post("/ask", json={"question": "What is the refund policy?"})
+    response = client.post("/ask", json={"question": "Is there a dress code?"})
 
     assert response.status_code == 200
-    assert response.json() == {"answer": config.NOT_FOUND_ANSWER, "source": None}
+    assert response.json() == {
+        "answer": "I could not find that information in the available knowledge base.",
+        "source": None,
+    }
 
 
 def test_question_is_trimmed(client, assistant):
@@ -152,6 +163,32 @@ def test_missing_api_key_is_a_503(client, assistant):
 def test_missing_index_is_a_503(client, assistant):
     assistant.raises = IndexNotBuiltError()
     response = client.post("/ask", json={"question": "Fees?"})
+
+    assert response.status_code == 503
+    assert "python -m app.ingest" in response.json()["error"]
+
+
+# --- /health --------------------------------------------------------------
+
+class FakeCollection:
+    def get(self, include):
+        return {"metadatas": [{"source": "handbook"}] * 2 + [{"source": "website"}] * 3}
+
+
+def test_health_counts_chunks_per_source(monkeypatch):
+    monkeypatch.setattr(vector_store, "get_collection", lambda: FakeCollection())
+    response = TestClient(app).get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["chunks"] == {"handbook": 2, "website": 3}
+
+
+def test_health_explains_a_missing_index(monkeypatch):
+    def missing():
+        raise IndexNotBuiltError()
+
+    monkeypatch.setattr(vector_store, "get_collection", missing)
+    response = TestClient(app).get("/health")
 
     assert response.status_code == 503
     assert "python -m app.ingest" in response.json()["error"]

@@ -9,7 +9,7 @@ from app import config
 
 class IndexNotBuiltError(RuntimeError):
     def __init__(self):
-        super().__init__("The handbook hasn't been indexed yet. Run: python -m app.ingest")
+        super().__init__("The knowledge base hasn't been indexed yet. Run: python -m app.ingest")
 
 
 def _client():

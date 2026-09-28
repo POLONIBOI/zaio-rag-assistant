@@ -18,16 +18,16 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import config
-from app.assistant import HandbookAssistant
-from app.llm import LLMError, MissingAPIKeyError
+from app.assistant import Assistant
+from app.llm import LLMError, MissingAPIKeyError, describe_llm
 from app.vector_store import IndexNotBuiltError
 
-log = logging.getLogger("handbook.api")
+log = logging.getLogger("zaio.api")
 
 app = FastAPI(
-    title="Zaio Handbook Assistant",
-    description="Answers student questions from the Full-Stack AI Engineer Bootcamp handbook.",
-    version="1.0.0",
+    title="Zaio Student Assistant",
+    description="Answers questions from the Full-Stack AI Engineer Bootcamp handbook and www.zaio.io.",
+    version="2.0.0",
 )
 
 
@@ -37,13 +37,13 @@ class AskRequest(BaseModel):
     question: str = Field(
         min_length=1,
         max_length=config.MAX_QUESTION_LENGTH,
-        examples=["What is the attendance requirement?"],
+        examples=["What courses does ZAIO offer?"],
     )
 
 
 class AskResponse(BaseModel):
     answer: str
-    source: str | None = Field(examples=["Page 12"])
+    source: str | None = Field(examples=["https://www.zaio.io/bootcamps", "Student Handbook - Page 18"])
 
 
 class ErrorResponse(BaseModel):
@@ -51,13 +51,13 @@ class ErrorResponse(BaseModel):
 
 
 @lru_cache(maxsize=1)
-def get_assistant() -> HandbookAssistant:
+def get_assistant() -> Assistant:
     # Built on the first request, not at import time, so the server still
     # starts (and /health can explain the problem) if the index is missing.
-    from app.llm import ClaudeAnswerer
+    from app.llm import make_answerer
     from app.retriever import Retriever
 
-    return HandbookAssistant(Retriever(), ClaudeAnswerer())
+    return Assistant(Retriever(), make_answerer())
 
 
 def error(status: int, message: str) -> JSONResponse:
@@ -83,10 +83,15 @@ def health():
     from app.vector_store import get_collection
 
     try:
-        chunks = get_collection().count()
+        collection = get_collection()
     except IndexNotBuiltError as exc:
         return error(503, str(exc))
-    return {"status": "ok", "chunks": chunks}
+    sources = [meta["source"] for meta in collection.get(include=["metadatas"])["metadatas"]]
+    return {
+        "status": "ok",
+        "chunks": {source: sources.count(source) for source in sorted(set(sources))},
+        "llm": describe_llm(),
+    }
 
 
 # --- error handling -------------------------------------------------------
