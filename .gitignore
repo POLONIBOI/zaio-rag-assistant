@@ -5,3 +5,7 @@ __pycache__/
 
 # rebuilt by `python -m app.ingest`
 chroma_db/
+
+# built by netlify/build-index.mjs during the Netlify build (needs the API key)
+netlify/data/index.json
+netlify/.netlify/

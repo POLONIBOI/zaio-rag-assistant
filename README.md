@@ -20,7 +20,9 @@ POST /ask  {"question": "Is there a dress code for live classes?"}
 → {"answer": "I could not find that information in the available knowledge base.", "source": null}
 ```
 
-These are real responses from the test run (local model, no API key). The first question was a "not found" in the handbook-only version.
+These are real responses from the local-model test run. The first question was a "not found" in the handbook-only version.
+
+**Live version:** https://zaio-student-assistant.netlify.app (see [The live version](#the-live-version)).
 
 ## Where each part of the brief is
 
@@ -28,8 +30,8 @@ These are real responses from the test run (local model, no API key). The first 
 |---|---|---|---|
 | 1. Extend the knowledge base | 25 | Keep the PDF, crawl and clean zaio.io, chunk and embed both, one vector DB, metadata | `app/crawl.py`, `app/ingest.py`, `data/website/pages.json` |
 | 2. Retrieve information | 25 | Embed the question, search both sources, answer from the context only, return the source, refuse when it isn't there | `app/retriever.py`, `app/reranker.py`, `app/llm.py`, `app/local_llm.py`, `app/assistant.py` |
-| 3. Update the API | 20 | `POST /ask` returns `answer` and the most appropriate `source` | `app/api.py` |
-| 4. Test the assistant | 15 | Handbook, website and unanswerable questions, each with question, source and answer | `scripts/run_questions.py` → `TEST_RESULTS.md` |
+| 3. Update the API | 20 | `POST /ask` returns `answer` and the most appropriate `source` | `app/api.py`, and live at `https://zaio-student-assistant.netlify.app/ask` (`netlify/`) |
+| 4. Test the assistant | 15 | Handbook, website and unanswerable questions, each with question, source and answer | `scripts/run_questions.py` → [TEST_RESULTS.md](TEST_RESULTS.md) (live, GPT) and [TEST_RESULTS_LOCAL_MODEL.md](TEST_RESULTS_LOCAL_MODEL.md) |
 | 5. n8n | 10 | Take a question, call the API, show or forward the answer | `n8n/ask-zaio-workflow.json` |
 
 ## Running it
@@ -181,7 +183,7 @@ They do. The handbook was written for one intake (May 2025) and quotes R 38,950 
 - It isn't asked at all if the reranker's best score is below 0. Asked anyway, it answered "What is the pass mark for the MCQs?" with "15%", which is the MCQ weighting. Of the 12 unanswerable test questions that get past the similarity gate, this check stops 10. It also stops 4 of the 50 answerable ones (`python scripts/eval_retrieval.py` prints both).
 - I tried Qwen2.5-0.5B-Instruct first: it said NOT FOUND to 6 of 7 answerable test questions. Qwen3's thinking mode would help the 0.6B check its own answers, but on this laptop ten questions hadn't finished after half an hour, so it's off.
 
-Its mistakes are listed in `TEST_RESULTS.md`.
+Its mistakes are listed in `TEST_RESULTS_LOCAL_MODEL.md`.
 
 ## Part 3: the API
 
@@ -241,9 +243,16 @@ No test calls the Claude API or loads the local LLM, so the suite costs nothing.
 Two scripts go further:
 
 - `python scripts/eval_retrieval.py` (add `--compare` for the strategy tables) measures retrieval on the 50 labelled questions. The numbers in this README come from it.
-- `python scripts/run_questions.py` is Part 4. It puts 16 questions through `POST /ask` and writes [TEST_RESULTS.md](TEST_RESULTS.md) with the question, the source and the generated answer: 5 answered by the handbook, 6 by the website, 1 by both (they disagree on the price) and 4 by neither.
+- `python scripts/run_questions.py` is Part 4. It puts 16 questions through `POST /ask` and writes the question, the source and the generated answer: 5 answered by the handbook, 6 by the website, 1 by both (they disagree on the price) and 4 by neither. With `--url` it runs against a deployed server.
 
-With the local model, 15 of the 16 cited an acceptable source or correctly said "not found". Checked by hand, 9 answers are right, 5 partly right and 2 wrong. `TEST_RESULTS.md` goes through each one, including why the two wrong ones went wrong.
+The 16 questions were run twice, and each answer was checked by hand:
+
+| Run | Sources as expected | Hand check |
+|---|---|---|
+| Live version, `gpt-4o-mini` ([TEST_RESULTS.md](TEST_RESULTS.md)) | 15/16 | 13 right, 1 mostly right, 1 partly right, 1 missed |
+| Local model, Qwen3-0.6B ([TEST_RESULTS_LOCAL_MODEL.md](TEST_RESULTS_LOCAL_MODEL.md)) | 15/16 | 9 right, 5 partly right, 2 wrong |
+
+The live version's own 20 tests (`netlify/rag.test.mjs`, run with `node --test` in `netlify/`) cover request validation, per-source search, the source format, the gate and the OpenAI calls, with a fake OpenAI.
 
 ## Part 5: n8n
 
@@ -271,14 +280,56 @@ I tested it in n8n 2.40.7 (Docker) against the running API:
 | Any question, API stopped | **The assistant is offline.** Your question couldn't be answered right now. Please try again in a minute, or ask a tutor on Discord. |
 | "Can I bring my dog to the live classes?", webhook pointed at a local stand-in for Discord | The not-found page. The stand-in received `{"username": "Zaio assistant", "content": "A student asked something the assistant could not answer from the handbook or zaio.io:\n> Can I bring my dog to the live classes?"}`, which is the JSON a Discord webhook takes |
 
+## The live version
+
+**https://zaio-student-assistant.netlify.app**: a page to ask questions on, and the same API at `POST https://zaio-student-assistant.netlify.app/ask` (and `GET /health`).
+
+```bash
+curl -X POST https://zaio-student-assistant.netlify.app/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is the refund policy?"}'
+```
+
+Netlify runs small JavaScript functions with about 1 GB of memory and a 10-second limit, so the Python app can't run there as it is. PyTorch, ChromaDB and the local models don't fit. The live version (`netlify/`) keeps the same chunks, request, response and rules, and swaps the heavy parts:
+
+| | Python app (`app/`) | Live version (`netlify/`) |
+|---|---|---|
+| Chunks | made by `app/ingest.py` | the same chunks, exported with `python scripts/export_chunks.py` |
+| Embeddings | all-MiniLM-L6-v2, on the CPU | OpenAI `text-embedding-3-small` |
+| Vector store | ChromaDB | a JSON file searched in memory, built during the Netlify deploy (`netlify/build-index.mjs`) |
+| Search | 5 per source, reranked | 5 per source (GPT reads all 10, so no reranker) |
+| LLM | Claude, or Qwen3-0.6B without a key | OpenAI `gpt-4o-mini` |
+| "Not found" gate | similarity 0.25 | similarity 0.25, measured again for OpenAI's embeddings (below) |
+
+The gate had to be checked again because the two embedding models score differently. With OpenAI embeddings (`python scripts/eval_live_index.py`), the off-topic questions score 0.17-0.18 and the lowest answerable one 0.37, so 0.25 still sits between them. The right page reaches the model for 48 of the 50 labelled questions; the Python version manages 49.
+
+**Results:** the same 16 questions through the live URL ([TEST_RESULTS.md](TEST_RESULTS.md)): 15/16 cited an acceptable source or correctly said "not found". Checked by hand, 13 are right, 1 mostly right, 1 partly right and 1 missed. The miss is a "not found" for a start date that wasn't among the excerpts the model got. Answers take 1-2 seconds.
+
+**The API key** is `OPENAI_API_KEY` in Netlify's environment variables, never in the repo. Every question costs a fraction of a US cent, and anyone with the link can ask, so the key should have a spending limit.
+
+**Deploying it yourself:**
+
+```bash
+python scripts/export_chunks.py          # only after re-crawling or changing the handbook
+cd netlify
+npx netlify-cli login
+npx netlify-cli sites:create --name <your-site-name>
+npx netlify-cli env:set OPENAI_API_KEY sk-...
+npx netlify-cli deploy --prod            # builds the index, bundles the functions, publishes the page
+node --test                              # the live version's 20 tests (fake OpenAI, no network)
+```
+
+If you connect the GitHub repo in Netlify instead, set the **base directory** to `netlify`. Otherwise Netlify sees the root `requirements.txt` and tries to install PyTorch on every build.
+
 ## Limitations
 
 - **The website snapshot ages.** It's from 28 September 2026. Prices, start dates and events change, so re-crawl before relying on it.
 - **The handbook is the May 2025 edition** and still contains template placeholders (`<DATE>`, `<TO BE ADDED>`), which the assistant repeats.
 - **Text only.** Images aren't read: the handbook's calendar and salary graph, and on the website anything shown only in a picture.
 - **The blog isn't indexed** (see Crawling), so questions answered only there come back as "not found".
-- **The local model makes mistakes** (2 wrong and 5 partly right out of 16 in `TEST_RESULTS.md`). It's a fallback so the project runs without a key.
-- **Claude hasn't been run for real.** There was no API key on the machine this was built on, so the Claude path is only covered by unit tests with a fake client. Put a key in `.env` and run `python scripts/run_questions.py` to see its answers.
+- **The local model makes mistakes** (2 wrong and 5 partly right out of 16 in `TEST_RESULTS_LOCAL_MODEL.md`). It's a fallback so the project runs without a key.
+- **Claude hasn't been run for real.** No Anthropic key was available, so the Claude path is only covered by unit tests with a fake client. The live version uses OpenAI instead. Put an Anthropic key in `.env` and run `python scripts/run_questions.py` to see Claude's answers.
+- **The live version's website snapshot is the same 28 September 2026 one**, so live answers about prices and dates can be out of date too.
 - It takes one question at a time and doesn't remember the conversation.
 
 ## Project layout
@@ -300,6 +351,12 @@ data/
   handbook.pdf
   website/pages.json   cleaned crawl of www.zaio.io
 n8n/ask-zaio-workflow.json
-scripts/            eval_retrieval.py, run_questions.py
+netlify/            the live version
+  lib/rag.mjs         search, gate, prompt and source format (same rules as app/)
+  functions/          POST /ask and GET /health
+  build-index.mjs     embeds data/chunks.json with OpenAI during the deploy
+  site/               the question page
+  rag.test.mjs        20 tests
+scripts/            eval_retrieval.py, run_questions.py, export_chunks.py, eval_live_index.py
 tests/
 ```

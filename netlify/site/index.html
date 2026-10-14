@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Ask a question about Zaio's Full-Stack AI Engineer Bootcamp handbook or www.zaio.io. Answers come only from those two sources." />
+    <title>Ask the handbook and zaio.io</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <span class="top__name">Student assistant</span>
+      <nav class="top__links" aria-label="Project links">
+        <a href="/health">API status</a>
+        <a href="https://github.com/POLONIBOI/zaio-rag-assistant">Source code</a>
+      </nav>
+    </header>
+
+    <main class="page">
+      <h1 class="title">Ask about the bootcamp <em>handbook</em> or <em>zaio.io</em></h1>
+      <p class="lede">
+        Answers come only from the Full-Stack AI Engineer Bootcamp handbook and a snapshot of
+        www.zaio.io, with the page they came from. If neither covers your question, it says so
+        instead of guessing.
+      </p>
+
+      <form class="ask" id="ask-form" novalidate>
+        <label class="ask__label" for="question">Your question</label>
+        <textarea id="question" name="question" rows="3" maxlength="500" required
+          placeholder="e.g. What is the refund policy?"></textarea>
+        <div class="ask__row">
+          <button type="submit" class="ask__button" id="ask-button">Ask</button>
+          <span class="ask__count" id="count" aria-hidden="true">0 / 500</span>
+        </div>
+      </form>
+
+      <section class="examples" aria-labelledby="examples-title">
+        <h2 id="examples-title" class="examples__title">Or try one of these</h2>
+        <ul class="examples__list">
+          <li><button type="button" class="example">What courses does ZAIO offer?</button></li>
+          <li><button type="button" class="example">What are the minimum laptop requirements?</button></li>
+          <li><button type="button" class="example">How much does the Fullstack AI Engineer bootcamp cost?</button></li>
+          <li><button type="button" class="example">Is there a dress code for live classes?</button></li>
+        </ul>
+      </section>
+
+      <section class="result" id="result" aria-live="polite" hidden>
+        <p class="result__question" id="result-question"></p>
+        <p class="result__answer" id="result-answer"></p>
+        <p class="result__source" id="result-source"></p>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <p>
+        A student project for Zaio's AI Capstone, not an official Zaio site. The website snapshot is
+        from 28 September 2026, so check zaio.io before acting on prices or dates.
+      </p>
+      <p>
+        For other apps: <code>POST /ask</code> with <code>{"question": "..."}</code> returns
+        <code>{"answer": "...", "source": "..."}</code>.
+      </p>
+    </footer>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

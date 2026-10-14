@@ -1,0 +1,10 @@
+# The live version. Netlify's base directory is this folder (netlify/), so the
+# Python requirements.txt at the repo root isn't installed on every build.
+
+[build]
+  command = "node build-index.mjs"
+  publish = "site"
+
+[functions]
+  directory = "functions"
+  node_bundler = "esbuild"
